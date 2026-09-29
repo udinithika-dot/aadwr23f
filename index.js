@@ -1,30 +1,13 @@
 const express = require('express');
 const app = express();
-__path = process.cwd()
-const bodyParser = require("body-parser");
-const PORT = process.env.PORT || 8000;
-let code = require('./pair'); 
+const pairRouter = require('./pair');
 
-require('events').EventEmitter.defaultMaxListeners = 500;
+// Railway එක සඳහා Port එක ලබාගැනීම
+const PORT = process.env.PORT || 8080;
 
-app.use('/code', code);
-app.use('/pair', async (req, res, next) => {
-    res.sendFile(__path + '/public/pair.html')
-});
-app.use('/', async (req, res, next) => {
-    res.sendFile(__path + '/public/main.html')
-});
-
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// pair.js ෆයිල් එක Express Router එකට සම්බන්ධ කිරීම
+app.use('/', pairRouter);
 
 app.listen(PORT, () => {
-    console.log(`
-Don't Forget To Give Star ‼️
-
-Forward By Mr.Supun Fernando 
-
-Server running on http://localhost:` + PORT)
+    console.log(`✅ Server is running perfectly on port ${PORT}`);
 });
-
-module.exports = app;
