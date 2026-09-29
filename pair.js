@@ -1,63 +1,74 @@
 const express = require('express');
 const fs = require('fs-extra');
 const path = require('path');
+const { exec } = require('child_process');
+const router = express.Router();
 const pino = require('pino');
+const cheerio = require('cheerio');
+const moment = require('moment-timezone');
+const Jimp = require('jimp');
+const crypto = require('crypto');
 const axios = require('axios');
+const { sms, downloadMediaMessage } = require("./lib/msg");
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     delay,
     getContentType,
     makeCacheableSignalKeyStore,
-    Browsers
+    Browsers,
+    jidNormalizedUser,
+    downloadContentFromMessage,
+    proto,
+    prepareWAMessageMedia,
+    generateWAMessageFromContent,
+    S_WHATSAPP_NET
 } = require('@whiskeysockets/baileys');
-
-const app = express();
-// Railway සඳහා අනිවාර්ය Port සැකසුම
-const PORT = process.env.PORT || 8080;
 
 const FIREBASE_URL = 'https://ceylon--network-default-rtdb.asia-southeast1.firebasedatabase.app/';
 
 const config = {
     BOT_NAME: 'PinTa_Bot',
+    BOT_FOOTER: 'PinTa fam!',
+    PREFIX: '.',
     MAX_RETRIES: 3,
+    GROUP_INVITE_LINK: 'https://chat.whatsapp.com/L69FkCOHQuI62zQ2uBxMqD?mode=gi_t',
+    RCD_IMAGE_PATH: 'https://i.ibb.co/YF3fD8G2/bbf573ca-a4e1-428f-9524-e5faeaa406ed.jpg',
+    OTP_EXPIRY: 300000,
+    OWNER_NUMBER: '94705123369'
 };
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
 const SESSION_BASE_PATH = './session';
+const otpStore = new Map();
 
-// Anti-Spam & Duplicate Tracker
+// Anti-spam tracker (තත්පර 20ක් ඇතුළත මැසේජ් 5ක් දැම්මොත් ඩිලීට් වේ)
 const userMessageTracker = new Map();
 const SPAM_THRESHOLD = 5; 
 const SPAM_TIMEFRAME = 20000; 
 
-// සාමාන්‍ය Bad Words ලැයිස්තුව (ඔයාගේ ඉතුරු වචන ටිකත් මෙතනටම දාගන්න)
+// සියලුම Bad Words ලැයිස්තුව
 const badWords = [
-    'eta', 'uranawa', 'urapan', 'puka', 'puke', 'labba', 'paka', 'pake', 'pakaya', 'pakata', 'pako', 'polla', 
-    'paiya', 'payiya', 'payya', 'walla', 'valla', 'hukanawa', 'taukanawa', 'hukapan', 'hukanna', 'huththa', 
-    'hutta', 'huttige', 'wambatu paiya', 'balli', 'belli', 'wesi', 'vesi', 'wesige', 'wesa', 'wesawa', 'kari', 
-    'keri', 'tau', 'taukanda', 'tahike', 'taike', 'gon bijja', 'kariya', 'haminenawa', 'wesauththa', 'pakaa', 
-    'walaththaya', 'topa', 'kimbi simba', 'kibi siba', 'kanna pori', 'konakapala', 'kimbi kawaiya', 'attimba', 
-    'wataella', 'kuttan chuti', 'walla patta', 'pol kawaiya', 'kes puri', 'badu', 'kari lodaya', 'baduwa', 
-    'wate yanawa', 'kimba', 'umbe amma', 'ammata hukanna', 'appata hukanawa', 'ammage redda', 'redda ussanawa', 
-    'diwa danawa', 'eraganin', 'wela', 'ganu hora', 'kari sepa', 'badu awa', 'leli puka', 'kotu paiya', 
-    'tomba hila', 'pai chooty', 'huk', 'bada wenawa', 'bek gahanawa', 'back gahanawa', 'jack gahanawa', 
-    'junda', 'pettiya', 'polim danawa', 'kona kapanawa', 'thongale', 'ma mala', 'poro para', 'sakkili', 
-    'luv juce', 'kukku', 'thana', 'dara baduwa', 'besike', 'ammt', 'pamkaya', 'humtha', 'esi',
-    'ඇට', 'උරනවා', 'උරපං', 'පුක', 'පුකේ', 'පුක්මන්තා', 'ලබ්බ', 'පක', 'පකේ', 'පකයා', 'පකට', 'පකෝ', 'පොල්ල', 
-    'පයිය', 'වල්ල', 'ලෙවකනවා', 'හුකනවා', 'ටඋකනවා', 'හුකපං', 'හුකන්න', 'හුත්ත', 'හුත්තිගෙ', 'උත්ති', 
-    'බැල්ලි', 'පර වේසි', 'වේස', 'වේසාවා', 'පට්ට වේසි', 'කැරි', 'මුහුදු හුකන්නා', 'ටෞ', 'ටෞකණ්ඩ', 'ටහිකේ', 
-    'ගොං බිජ්ජා', 'හැමිනෙනව', 'වේසෞත්තා', 'වලත්තයා', 'ටොපා', 'කිඹි සිඹා', 'කොනකපාල', 'කිඹි කාවයියා', 
-    'ඇට්ටිම්බ', 'වටඇල්ල', 'කුට්ටං චූටි', 'වල්ල පට්ට', 'පොල් කාවයිය', 'කෑස් පුරියා', 'බඩු කාරයා', 'කළු බඩ්ඩ', 
-    'වටේ යනවා', 'කිම්බ', 'උඹෙ අම්මා', 'අම්මට හුකන්න', 'අප්පට හුකනවා', 'අම්මගෙ රෙද්ද', 'රෙද්ද උස්සනවා', 
-    'දිව දානව', 'ඇරගනින්', 'වැල', 'ගෑණු හොරා', 'කැරි සැප', 'බඩු ආව', 'ලෑලි පුක', 'කෝටු පයිය', 'දාර පයිය', 
-    'සක්', 'ෆක්', 'හුක්', 'බඩ වෙනවා', 'බැක් ගහනව', 'ජැක් ගහපන්', 'ජුන්ඩා', 'පෙට්ටිය', 'පෝලිම් දානවා', 
-    'කොන කපනවා', 'තොංගලේ', 'මෑ මල', 'පොරෝ පාර', 'සක්කිලි', 'ලව් ජූස්', 'කුක්කු', 'තන', 'බේසිකෙ', 'පම්කයා'
-];
+    'hutto', 'pako', 'pago', 'keriyo', 'lollamalgoda', 'lolla', 'fuck', 'ponnaya', 'ponnayo', 'ponna',
+    'gay', 'hucpn', 'huttige putho', 'huttiye', 'keri ponnayo', 'hutta', 'pakak', 'hukapan', 'hukahn', 
+    'ubalage amma', 'ammage hutta', 'ammata hukahan'
+]; 
 
 if (!fs.existsSync(SESSION_BASE_PATH)) {
     fs.mkdirSync(SESSION_BASE_PATH, { recursive: true });
+}
+
+function formatMessage(title, content, footer) {
+    return `*${title}*\n\n${content}\n\n> *${footer}*`;
+}
+
+function generateOTP() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function getSriLankaTimestamp() {
+    return moment().tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss');
 }
 
 async function cleanDuplicateFiles(number) {
@@ -65,11 +76,15 @@ async function cleanDuplicateFiles(number) {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
         const { data } = await axios.get(`${FIREBASE_URL}/session.json`);
         if (!data) return;
-        const sessionKeys = Object.keys(data).filter(key => key.startsWith(`empire_${sanitizedNumber}_`) && key.endsWith('.json')).sort((a, b) => {
+
+        const sessionKeys = Object.keys(data).filter(
+            key => key.startsWith(`empire_${sanitizedNumber}_`) && key.endsWith('.json')
+        ).sort((a, b) => {
             const timeA = parseInt(a.match(/empire_\d+_(\d+)\.json/)?.[1] || 0);
             const timeB = parseInt(b.match(/empire_\d+_(\d+)\.json/)?.[1] || 0);
             return timeB - timeA;
         });
+
         if (sessionKeys.length > 1) {
             for (let i = 1; i < sessionKeys.length; i++) {
                 await axios.delete(`${FIREBASE_URL}/session/${sessionKeys[i].replace('.json', '')}.json`);
@@ -78,27 +93,26 @@ async function cleanDuplicateFiles(number) {
     } catch (error) {}
 }
 
+async function sendOTP(socket, number, otp) {
+    const userJid = jidNormalizedUser(socket.user.id);
+    const message = formatMessage('🔐 OTP VERIFICATION', `Your OTP is: *${otp}*\nExpires in 5 mins.`, config.BOT_FOOTER);
+    try { await socket.sendMessage(userJid, { text: message }); } catch (error) {}
+}
+
 function setupCommandHandlers(socket, number) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast' || msg.key.remoteJid === config.NEWSLETTER_JID) return;
 
-        let msgType = getContentType(msg.message);
-        if (msgType === 'ephemeralMessage') {
-            msg.message = msg.message.ephemeralMessage.message;
-            msgType = getContentType(msg.message);
-        }
-
-        let body = '';
-        if (msgType === 'conversation') {
-            body = msg.message.conversation;
-        } else if (msgType === 'extendedTextMessage') {
-            body = msg.message.extendedTextMessage.text;
-        } else if (msgType === 'imageMessage' && msg.message.imageMessage.caption) {
-            body = msg.message.imageMessage.caption;
-        } else if (msgType === 'videoMessage' && msg.message.videoMessage.caption) {
-            body = msg.message.videoMessage.caption;
-        }
+        const type = getContentType(msg.message);
+        msg.message = (getContentType(msg.message) === 'ephemeralMessage') ? msg.message.ephemeralMessage.message : msg.message;
+        
+        const body = (type === 'conversation') ? msg.message.conversation 
+            : msg.message?.extendedTextMessage?.contextInfo?.hasOwnProperty('quotedMessage') 
+                ? msg.message.extendedTextMessage.text 
+            : (type === 'extendedTextMessage') 
+                ? msg.message.extendedTextMessage.text 
+            : '';
 
         const from = msg.key.remoteJid;
         const sender = msg.key.participant || msg.key.remoteJid;
@@ -106,78 +120,123 @@ function setupCommandHandlers(socket, number) {
         const botNumber = socket.user.id.split(':')[0];
         const isBot = botNumber === senderNumber;
         const isGroup = from.endsWith('@g.us');
-        const textLower = body.toLowerCase().trim();
 
         let isAdmin = false;
+        let isBotAdmin = false;
+        let groupMetadata = {};
+        
         if (isGroup) {
             try {
-                const groupMetadata = await socket.groupMetadata(from);
-                const adminList = groupMetadata.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin').map(p => p.id);
+                groupMetadata = await socket.groupMetadata(from);
+                const participants = groupMetadata.participants;
+                const adminList = participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin').map(p => p.id);
                 isAdmin = adminList.includes(sender);
+                isBotAdmin = adminList.includes(`${botNumber}@s.whatsapp.net`);
             } catch (e) {}
         }
-        
+
         const isFromMe = msg.key.fromMe || isBot;
 
-        // Auto Reply for Hi / Hello
-        if (textLower === 'hi' || textLower === 'hello') {
+        // 1. YouTube Link Auto Delete 
+        const isYouTubeLink = body && body.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\//gi);
+        if (isYouTubeLink && !isFromMe && !isAdmin && isGroup) {
+            try { await socket.sendMessage(from, { delete: msg.key }); } catch (err) {}
+        }
+
+        // 2. Bad Words Auto Delete + Reply ❌
+        const containsBadWord = badWords.some(word => body && body.toLowerCase().includes(word.toLowerCase()));
+        if (containsBadWord && !isFromMe && !isAdmin && isGroup) {
             try {
-                await socket.sendMessage(from, { text: 'Hello! Welcome to the group! 👋' }, { quoted: msg });
+                await socket.sendMessage(from, { delete: msg.key });
+                await socket.sendMessage(from, { text: '❌' });
             } catch (err) {}
         }
 
-        // Moderation Features (Only if sender is NOT an Admin and NOT the Bot itself)
-        if (!isFromMe && !isAdmin && isGroup && body !== '') {
-
-            // 1. Any Link Delete (YouTube, FB, WhatsApp, etc.)
-            const isAnyLink = body.match(/(?:https?:\/\/)?(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi);
-            if (isAnyLink) {
-                try { 
-                    await socket.sendMessage(from, { delete: msg.key }); 
-                    return; 
-                } catch (err) {}
-            }
-
-            // 2. Bad Words Delete + English Warning
-            const containsBadWord = badWords.some(word => textLower.includes(word.toLowerCase()));
-            if (containsBadWord) {
-                try {
-                    await socket.sendMessage(from, { delete: msg.key });
-                    const warningMsg = `⚠️ *WARNING*\n\n@${senderNumber}, Please do not use bad words in this group!`;
-                    await socket.sendMessage(from, { text: warningMsg, mentions: [sender] });
-                    return;
-                } catch (err) {}
-            }
-
-            // 3. Anti-Spam & Duplicate Tracker
-            const currentTime = Date.now();
+        // 3. Anti-Spam Feature (එකම කෙනා වෙනස් මැසේජ් 5ක් එක දිගට දැමීම)
+        if (!isFromMe && !isAdmin && isGroup) {
             const trackerKey = `${from}-${sender}`;
-            const userRecord = userMessageTracker.get(trackerKey) || { text: '', count: 0, startTime: currentTime };
+            const currentTime = Date.now();
+            const lastRecord = userMessageTracker.get(trackerKey);
 
-            // Check Duplicate (එකම මැසේජ් එක දෙපාරක් දැමීම)
-            if (userRecord.text === body) {
-                try { 
-                    await socket.sendMessage(from, { delete: msg.key }); 
-                    return; 
-                } catch (err) {}
-            }
-
-            // Check Spam (මැසේජ් 5ක් තත්පර 20ක් ඇතුළත දැමීම)
-            if ((currentTime - userRecord.startTime) < SPAM_TIMEFRAME) {
-                userRecord.count += 1;
-                if (userRecord.count >= SPAM_THRESHOLD) {
-                    try { 
-                        await socket.sendMessage(from, { delete: msg.key }); 
-                        return; 
-                    } catch (err) {}
+            if (lastRecord) {
+                // තත්පර 20ක් ඇතුළත දැයි පරීක්ෂා කිරීම
+                if ((currentTime - lastRecord.startTime) < SPAM_TIMEFRAME) {
+                    lastRecord.count += 1;
+                    
+                    if (lastRecord.count >= SPAM_THRESHOLD) {
+                        // මැසේජ් 5 සීමාව පැන්නොත් මැසේජ් එක ඩිලීට් කරයි
+                        try { await socket.sendMessage(from, { delete: msg.key }); } catch (err) {}
+                    } else {
+                        userMessageTracker.set(trackerKey, lastRecord);
+                    }
+                } else {
+                    // කාලය ඉවර නම් කවුන්ට් එක අලුතින් පටන් ගනී
+                    userMessageTracker.set(trackerKey, { count: 1, startTime: currentTime });
                 }
             } else {
-                userRecord.count = 1;
-                userRecord.startTime = currentTime;
+                userMessageTracker.set(trackerKey, { count: 1, startTime: currentTime });
             }
-            
-            userRecord.text = body;
-            userMessageTracker.set(trackerKey, userRecord);
+        }
+
+        const prefix = config.PREFIX;
+        const isCmd = body && body.startsWith(prefix);
+        const command = isCmd ? body.slice(prefix.length).trim().split(' ').shift().toLowerCase() : '.';
+
+        if (!command || command === '.') return;
+
+        try {
+            switch (command) {
+                case 'deleteme': {
+                    await fullDeleteSession(number);
+                    await socket.sendMessage(from, { text: "✅ Your session has been deleted." });
+                    break;
+                }
+                case 'tagall':
+                case 'all': {
+                    if (!isGroup) return await socket.sendMessage(from, { text: 'මේක Group එකක් ඇතුලේ විතරයි පාවිච්චි කරන්න පුළුවන්!' });
+                    if (!isAdmin && senderNumber !== config.OWNER_NUMBER) return await socket.sendMessage(from, { text: '❌ මේක Admin ලට විතරයි පුළුවන්!' });
+                    
+                    let text = `📢 *Attention PinTa fam!* 📢\n\n`;
+                    for (let mem of groupMetadata.participants) {
+                        text += `👾 @${mem.id.split('@')[0]}\n`;
+                    }
+                    await socket.sendMessage(from, { text: text, mentions: groupMetadata.participants.map(a => a.id) });
+                    break;
+                }
+                case 'mute': {
+                    if (!isGroup) return;
+                    if (!isAdmin && senderNumber !== config.OWNER_NUMBER) return;
+                    if (!isBotAdmin) return await socket.sendMessage(from, { text: 'Bot ව Admin කරන්න!' });
+                    await socket.groupSettingUpdate(from, 'announcement');
+                    await socket.sendMessage(from, { text: '🔒 Group එක Mute කරා. (Admins only)' });
+                    break;
+                }
+                case 'unmute': {
+                    if (!isGroup) return;
+                    if (!isAdmin && senderNumber !== config.OWNER_NUMBER) return;
+                    if (!isBotAdmin) return;
+                    await socket.groupSettingUpdate(from, 'not_announcement');
+                    await socket.sendMessage(from, { text: '🔓 Group එක Unmute කරා. (All Participants)' });
+                    break;
+                }
+                case 'kick': {
+                    if (!isGroup) return;
+                    if (!isAdmin && senderNumber !== config.OWNER_NUMBER) return;
+                    if (!isBotAdmin) return await socket.sendMessage(from, { text: 'Bot ව Admin කරන්න!' });
+
+                    let users = msg.message?.extendedTextMessage?.contextInfo?.participant 
+                                ? [msg.message.extendedTextMessage.contextInfo.participant] 
+                                : msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                                
+                    if (users.length === 0) return await socket.sendMessage(from, { text: 'Kick කරන්න ඕනේ කෙනාව Mention කරන්න!' });
+                    
+                    await socket.groupParticipantsUpdate(from, users, 'remove');
+                    await socket.sendMessage(from, { text: '✅ අයින් කරා!', mentions: users });
+                    break;
+                }
+            }
+        } catch (error) {
+            console.error('Command handler error:', error);
         }
     });
 }
@@ -196,6 +255,7 @@ async function fullDeleteSession(number) {
     try {
         const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
         if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath);
+
         const pathsToDelete = [`session/creds_${sanitizedNumber}`, `numbers/${sanitizedNumber}`];
         for (const p of pathsToDelete) {
             try { await axios.delete(`${FIREBASE_URL}/${p}.json`); } catch (e) {}
@@ -212,6 +272,7 @@ function setupAutoRestart(socket, number) {
     socket.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         const cleanNumber = number.replace(/[^0-9]/g, '');
+
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === 401) { 
@@ -249,6 +310,36 @@ async function EmpirePair(number, res) {
         setupAutoRestart(socket, sanitizedNumber);
         setupCommandHandlers(socket, sanitizedNumber);
 
+        socket.ev.on('group-participants.update', async (anu) => {
+            console.log('Group Participants Update Event Triggered:', anu);
+            try {
+                let jid = anu.id;
+                if (!jid || !jid.endsWith('@g.us')) return;
+
+                let action = anu.action;
+                let participants = anu.participants;
+                const botNumber = socket.user.id.split(':')[0];
+
+                for (let num of participants) {
+                    if (num.includes(botNumber)) continue; 
+
+                    if (action === 'add') {
+                        let welcomeText = `🎮 *𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙏𝙊 𝙋𝙞𝙣𝙏𝙖 𝙛𝙖𝙢!* 🎮\n\nහේයි @${num.split('@')[0]},\nPinTa ගේ අතිසුපිරි Gaming ලෝකයට සාදරයෙන් පිළිගන්නවා! 👾🔥\n\nමේක තමයි අපේ YouTube Channel එකේ ගැම්මට සෙට් වෙන අපේම Fam එක. Live Streams, අලුත්ම Gaming Updates ඔක්කොම මෙතනින් දැනගන්න පුළුවන්. 🚀\n\n⚠️ *Group Rules:*\n🚫 නරක වචන භාවිතය තහනම් (Auto Delete)\n🚫 වෙනත් ලින්ක් දැමීම තහනම් (Auto Delete)\n🚫 Spam කිරීම තහනම්\n\nEnjoy the stream & Stay active! ගැම්මක් අල්ලමු! ✌️❤️`;
+                        
+                        await socket.sendMessage(jid, { text: welcomeText, mentions: [num] });
+                        console.log(`Welcome sent to ${num}`);
+                    } else if (action === 'remove' || action === 'leave') {
+                        let leaveText = `👋 @${num.split('@')[0]} අපිව දාලා ගියා. ආයෙත් දවසක ලයිව් එකේ සෙට් වෙමු! 🎮💔`;
+                        
+                        await socket.sendMessage(jid, { text: leaveText, mentions: [num] });
+                        console.log(`Goodbye sent to ${num}`);
+                    }
+                }
+            } catch (err) {
+                console.error("Welcome/Bye Message Error:", err);
+            }
+        });
+
         if (!socket.authState.creds.registered) {
             let retries = config.MAX_RETRIES;
             let code;
@@ -282,9 +373,9 @@ async function EmpirePair(number, res) {
     }
 }
 
-app.get('/', async (req, res) => {
+router.get('/', async (req, res) => {
     const { number } = req.query;
-    if (!number) return res.status(400).send({ error: 'Number required. Ex: /?number=94701234567' });
+    if (!number) return res.status(400).send({ error: 'Number required' });
     if (activeSockets.has(number.replace(/[^0-9]/g, ''))) return res.status(200).send({ status: 'already_connected' });
     await EmpirePair(number, res);
 });
@@ -304,7 +395,4 @@ async function autoReconnectFromFirebase() {
 }
 autoReconnectFromFirebase();
 
-// සර්වර් එක Start කිරීම (Railway Port Fix)
-app.listen(PORT, () => {
-    console.log(`✅ Server is running perfectly on port ${PORT}`);
-});
+module.exports = router;
